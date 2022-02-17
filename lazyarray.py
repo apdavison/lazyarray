@@ -3,23 +3,26 @@
 lazyarray is a Python package that provides a lazily-evaluated numerical array
 class, ``larray``, based on and compatible with NumPy arrays.
 
-Copyright Andrew P. Davison, Joël Chavas and Elodie Legouée (CNRS), 2012-2020
+Copyright Andrew P. Davison, Joël Chavas and Elodie Legouée (CNRS), 2012-2021
 """
 
+from __future__ import annotations
 import numbers
 import operator
 from copy import deepcopy
 import collections
 from functools import wraps, reduce
 import logging
+from abc import ABCMeta, abstractmethod
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union, Iterable, Generator
+from typing_extensions import Protocol, runtime_checkable
 
 import numpy as np
-from numpy import bool_, float64, int64, ndarray, ufunc
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from numpy import float64, int64, ndarray, ufunc
+from numpy.typing import DTypeLike, NDArray
 
 try:
-    from scipy import sparse
-    from scipy.sparse import bsr_matrix, coo_matrix, csc_matrix, csr_matrix, dia_matrix, dok_matrix, lil_matrix
+    from scipy import sparse  # type: ignore
     have_scipy = True
 except ImportError:
     have_scipy = False
@@ -28,6 +31,20 @@ except ImportError:
 __version__ = "0.5.0"
 
 logger = logging.getLogger("lazyarray")
+
+
+class Shaped(Protocol):
+    shape: Tuple[int, ...]
+
+
+#Shape = Union[Tuple[int], Tuple[int, int], Tuple[int, int, int]]
+Shape = Tuple[int, ...]
+Operation = Tuple[Callable, Any]
+BooleanArray = NDArray[np.bool_]
+AddressElement = Union[int, slice, ndarray]
+Address = Union[Tuple[AddressElement, ...], BooleanArray]
+PartialAddress = Union[Address, int, Shape]
+BaseValue = Union[int, float, bool, ndarray, Iterable, Generator, Callable]
 
 
 def check_shape(meth: Callable) -> Callable:
@@ -53,23 +70,23 @@ def requires_shape(meth: Callable) -> Callable:
     return wrapped_meth
 
 
-def full_address(addr: Any, full_shape: Union[Tuple[int], Tuple[int, int], Tuple[int, int, int]]) -> Any:
+def full_address(addr: Union[PartialAddress, Address], full_shape: Shape) -> Address:
     if not (isinstance(addr, np.ndarray) and addr.dtype == bool and addr.ndim == len(full_shape)):
         if not isinstance(addr, tuple):
             addr = (addr,)
         if len(addr) < len(full_shape):
-            full_addr = [slice(None)] * len(full_shape)
+            full_addr: List[AddressElement] = [slice(None)] * len(full_shape)
             for i, val in enumerate(addr):
                 full_addr[i] = val
-            addr = full_addr
+            addr = tuple(full_addr)
     return addr
 
 
-def partial_shape(addr: Any, full_shape: Union[Tuple[int], Tuple[int, int], Tuple[int, int, int]]) -> Any:
+def partial_shape(addr: Union[PartialAddress, Address], full_shape: Shape) -> Shape:
     """
     Calculate the size of the sub-array represented by `addr`
     """
-    def size(x, max):
+    def size(x: AddressElement, max: int) -> Union[int, None]:
         if isinstance(x, (int, np.integer)):
             return None
         elif isinstance(x, slice):
@@ -135,7 +152,7 @@ def is_array_like(value: Any) -> bool:
     # False for numbers, generators, functions, iterators
     if not isinstance(value, collections.Sized):
         return False
-    if sparse.issparse(value):
+    if have_scipy and sparse.issparse(value):
         return True
     if isinstance(value, collections.Mapping):
         # because we may wish to have lazy arrays in which each
@@ -167,7 +184,7 @@ class larray(object):
     """
 
 
-    def __init__(self, value: Any, shape: Optional[Union[Tuple[int], Tuple[int, int], Tuple[int, int, int], int]]=None, dtype: Optional[Union[Type[int], Type[float]]]=None) -> None:
+    def __init__(self, value: Any, shape: Optional[Shape]=None, dtype: Optional[Union[Type[int], Type[float]]]=None) -> None:
         """
         Create a new lazy array.
 
@@ -181,7 +198,9 @@ class larray(object):
         """
 
         self.dtype = dtype
-        self.operations = []
+        self.operations: List[Operation] = []
+        self.base_value: BaseValue
+
         if isinstance(value, str):
             raise TypeError("An larray cannot be created from a string")
         elif isinstance(value, larray):
@@ -218,7 +237,7 @@ class larray(object):
                 except TypeError:
                     self.base_value = value
 
-    def __eq__(self, other: Union[larray, ndarray, float, int]) -> Union[bool_, bool]:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, self.__class__):
             return self.base_value == other.base_value and self.operations == other.operations and self._shape == other.shape
         elif isinstance(other, numbers.Number):
@@ -258,7 +277,10 @@ class larray(object):
                                                                              self.dtype,
                                                                              self.operations)
 
-    def _set_shape(self, value: Union[Tuple[int], Tuple[int, int]]) -> None:
+    def _get_shape(self) -> Shape:
+        return  self._shape
+
+    def _set_shape(self, value: Shape) -> None:
         if (hasattr(self.base_value, "shape") and
                 self.base_value.shape and   # values of type np.float have an empty shape
                     self.base_value.shape != value):
@@ -267,25 +289,25 @@ class larray(object):
         for op in self.operations:
             if isinstance(op[1], larray):
                 op[1].shape = value
-    shape = property(fget=lambda self: self._shape,
-                     fset=_set_shape, doc="Shape of the array")
 
-    @property
+    shape = property(fget=_get_shape, fset=_set_shape, doc="Shape of the array")
+
+    @property  # type: ignore
     @requires_shape
     def nrows(self) -> int:
         """Size of the first dimension of the array."""
         return self._shape[0]
 
-    @property
+    @property  # type: ignore
     @requires_shape
     def ncols(self) -> int:
         """Size of the second dimension (if it exists) of the array."""
         if len(self.shape) > 1:
-            return self._shape[1]
+            return self.shape[1]
         else:
             return 1
 
-    @property
+    @property  # type: ignore
     @requires_shape
     def size(self) -> int:
         """Total number of elements in the array."""
@@ -300,21 +322,21 @@ class larray(object):
         hom_ops = all(obj.is_homogeneous for f, obj in self.operations if isinstance(obj, larray))
         return hom_base and hom_ops
 
-    def _partial_shape(self, addr: Any) -> Any:
+    def _partial_shape(self, addr: Union[PartialAddress, Address]) -> Shape:
         """
         Calculate the size of the sub-array represented by `addr`
         """
         return partial_shape(addr, self._shape)
 
-    def _homogeneous_array(self, addr: Any) -> ndarray:
+    def _homogeneous_array(self, addr: Union[PartialAddress, Address]) -> ndarray:
         self.check_bounds(addr)
         shape = self._partial_shape(addr)
         return np.ones(shape, type(self.base_value))
 
-    def _full_address(self, addr: Any) -> Any:
+    def _full_address(self, addr: Union[PartialAddress, Address]) -> Address:
         return full_address(addr, self._shape)
 
-    def _array_indices(self, addr: Any) -> Union[List[int], List[ndarray], Tuple[ndarray], Tuple[ndarray, ndarray]]:
+    def _array_indices(self, addr: Union[PartialAddress, Address]) -> Union[List[int], List[ndarray], Tuple[ndarray], Tuple[ndarray, ndarray]]:
         self.check_bounds(addr)
 
         def axis_indices(x, max):
@@ -355,7 +377,7 @@ class larray(object):
                 raise NotImplementedError("Only 1D and 2D arrays supported")
 
     @requires_shape
-    def __getitem__(self, addr: Any) -> Union[ndarray, int64, float64, float, int]:
+    def __getitem__(self, addr: Union[PartialAddress, Address]) -> Union[ndarray, int64, float64, float, int]:
         """
         Return one or more items from the array, as for NumPy arrays.
 
@@ -364,7 +386,7 @@ class larray(object):
         """
         return self._partially_evaluate(addr, simplify=False)
 
-    def _partially_evaluate(self, addr: Any, simplify: bool=False) -> Union[ndarray, int64, float64, float, int]:
+    def _partially_evaluate(self, addr: Union[PartialAddress, Address], simplify: bool=False) -> Union[ndarray, int64, float64, float, int]:
         """
         Return part of the lazy array.
         """
@@ -404,7 +426,7 @@ class larray(object):
         return self._apply_operations(base_val, addr, simplify=simplify)
 
     @requires_shape
-    def check_bounds(self, addr: Any) -> None:
+    def check_bounds(self, addr: Union[PartialAddress, Address]) -> None:
         """
         Check whether the given address is within the array bounds.
         """
@@ -461,7 +483,7 @@ class larray(object):
         """
         self.operations.append((f, None))
 
-    def _apply_operations(self, x: Union[ndarray, int64, float64, float, int], addr: Optional[Any]=None, simplify: bool=False) -> Any:
+    def _apply_operations(self, x: Union[ndarray, int64, float64, float, int], addr: Optional[Union[PartialAddress, Address]]=None, simplify: bool=False) -> Any:
         for f, arg in self.operations:
             if arg is None:
                 x = f(x)
@@ -557,13 +579,16 @@ class larray(object):
     __abs__ = lazy_unary_operation('abs')
 
 
-class VectorizedIterable(object):
+class VectorizedIterable(metaclass=ABCMeta):
     """
     Base class for any class which has a method `next(n)`, i.e., where you
     can choose how many values to return rather than just returning one at a
     time.
     """
-    pass
+
+    @abstractmethod
+    def next(self, n: int) -> Any:
+        raise NotImplementedError()
 
 
 def _build_ufunc(func: ufunc) -> Callable:

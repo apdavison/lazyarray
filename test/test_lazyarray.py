@@ -96,11 +96,11 @@ def test_create_with_function2D():
 
 
 def test_create_inconsistent():
-    assert_raises(ValueError, larray, [1, 2, 3], shape=4)
+    assert_raises(ValueError, larray, [1, 2, 3], shape=(4,))
 
 
 def test_create_with_string():
-    assert_raises(TypeError, larray, "123", shape=3)
+    assert_raises(TypeError, larray, "123", shape=(3,))
 
 
 def test_create_with_larray():
